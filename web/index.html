@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CalcMate</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="solver">
+        <div class="topbar">
+          <div>
+            <h1>CalcMate</h1>
+            <p>Neuro-symbolic physics tutor</p>
+          </div>
+          <select id="overlay">
+            <option value="ncert">NCERT</option>
+            <option value="jee">JEE Coaching</option>
+          </select>
+        </div>
+
+        <textarea id="problem" rows="5">A ball is thrown upward with initial velocity 20 m/s. Find the maximum height.</textarea>
+        <button id="solve">Solve</button>
+
+        <div class="result-grid">
+          <article>
+            <h2>Answer</h2>
+            <pre id="answer">Ready.</pre>
+          </article>
+          <article>
+            <h2>Extraction</h2>
+            <pre id="extraction">No problem solved yet.</pre>
+          </article>
+          <article>
+            <h2>Graph Path</h2>
+            <pre id="graph">No path yet.</pre>
+          </article>
+          <article>
+            <h2>Weak Nodes</h2>
+            <pre id="weak">No attempts yet.</pre>
+          </article>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+
