@@ -1,0 +1,11 @@
+{
+  "id": "ncert",
+  "name": "NCERT",
+  "equation_priority": ["eq_v_u_at", "eq_s_ut_half_at2", "eq_v2_u2_2as"],
+  "blocked_methods": [],
+  "show_intermediate_steps": true,
+  "show_units": true,
+  "narration_tone": "stepwise",
+  "structure": "given_find"
+}
+

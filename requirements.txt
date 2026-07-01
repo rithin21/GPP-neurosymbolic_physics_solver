@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+networkx
+sympy
+pydantic
+dspy
+pint
+numpy
+sentence-transformers
+faiss-cpu

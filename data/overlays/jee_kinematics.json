@@ -1,0 +1,11 @@
+{
+  "id": "jee",
+  "name": "JEE Coaching",
+  "equation_priority": ["eq_v2_u2_2as", "eq_v_u_at", "eq_s_ut_half_at2"],
+  "blocked_methods": [],
+  "show_intermediate_steps": false,
+  "show_units": true,
+  "narration_tone": "concise",
+  "structure": "answer_first"
+}
+

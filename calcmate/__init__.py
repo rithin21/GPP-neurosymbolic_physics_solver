@@ -1,0 +1,2 @@
+"""CalcMate prototype package."""
+
