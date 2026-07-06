@@ -18,7 +18,7 @@ DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 class CaseRetriever(Protocol):
     def retrieve(self, problem: ExtractedProblem, top_k: int = 3) -> list[RetrievedCase]:
-        ...
+        raise RuntimeError("INSIDE RETRIEVE")
 
 
 def case_to_text(case: RetrievedCase | dict) -> str:
@@ -52,7 +52,7 @@ def load_cases_jsonl(path: Path | str) -> list[RetrievedCase]:
                 problem_text=data["problem_text"],
                 known_symbols=set(data["known_symbols"]),
                 unknown=data["unknown"],
-                domain=data["domain"],
+                domain=data.get("domain", data.get("chapter")),
                 constraints_fired=list(data.get("constraints_fired", [])),
                 implied_values=dict(data.get("implied_values", {})),
                 equations_used=list(data.get("equations_used", [])),
@@ -132,6 +132,17 @@ class FaissCaseRetriever:
         self.meta_path = Path(meta_path)
         self.embedding_model_name = embedding_model
         self.cases = load_cases_jsonl(self.cases_path)
+
+        print("\n========== RETRIEVER INIT ==========")
+        print("Cases path:", self.cases_path)
+        print("Index path:", self.index_path)
+        print("Meta path:", self.meta_path)
+        print("Total cases loaded:", len(self.cases))
+        print("First case:", self.cases[0].case_id if self.cases else "None")
+        print("Last case:", self.cases[-1].case_id if self.cases else "None")
+        print("====================================\n")
+
+
         self._index = None
         self._case_ids: list[str] = []
         self._model = None
@@ -139,16 +150,25 @@ class FaissCaseRetriever:
 
     def retrieve(self, problem: ExtractedProblem, top_k: int = 3) -> list[RetrievedCase]:
         query_text = self._query_text(problem)
+        print("\nQUERY:", query_text)
+
         vector = self._embed([query_text])
         distances, indices = self._index_search(vector, top_k=max(top_k * 4, top_k))
+
+        print("Indices:", indices)
+        print("Distances:", distances)
+
         candidates: list[RetrievedCase] = []
         for distance, index in zip(distances[0], indices[0]):
             if index < 0 or index >= len(self.cases):
                 continue
+
             case = self.cases[index]
+
             semantic_score = float(1.0 / (1.0 + distance))
             structural_score = self._structural_score(problem, case)
             total_score = semantic_score * 0.7 + structural_score * 0.3
+
             candidates.append(
                 RetrievedCase(
                     case_id=case.case_id,

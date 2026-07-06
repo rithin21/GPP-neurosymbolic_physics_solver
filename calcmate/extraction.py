@@ -4,11 +4,47 @@ import json
 import os
 from typing import Any
 
-from calcmate.constants import UNIT_BY_SYMBOL
+from calcmate.constants import (
+    CANONICAL_SYMBOLS,
+    UNIT_BY_SYMBOL,
+    SYMBOL_ALIASES,
+)
 from calcmate.models import ExtractedProblem, Quantity
 
 
 SUPPORTED_SYMBOLS = set(UNIT_BY_SYMBOL)
+GRADE_6_7_TRIGGER_PHRASES = [
+    "average speed",
+    "uniform motion",
+    "constant speed",
+    "starts from rest",
+    "comes to rest",
+    "travels",
+    "covers",
+    "journey",
+    "walks",
+    "runs",
+    "moves",
+]
+TARGET_PHRASE_MAP = {
+    "find speed": "speed",
+    "find the speed": "speed",
+    "calculate speed": "speed",
+    "calculate the speed": "speed",
+    "what is its speed": "speed",
+    "what is the speed": "speed",
+    "find distance": "distance",
+    "find the distance": "distance",
+    "calculate distance": "distance",
+    "calculate the distance": "distance",
+    "what distance": "distance",
+    "how far": "distance",
+    "find time": "time",
+    "find the time": "time",
+    "calculate time": "time",
+    "calculate the time": "time",
+    "how long": "time",
+}
 
 
 class ExtractionError(ValueError):
@@ -41,7 +77,13 @@ def _build_signature():#This function creates the DSPy “contract” for the LL
         }
 
         Symbols: u initial velocity, v final velocity, a acceleration,
-        t time, s displacement/distance/height.
+        t time, s displacement/distance/height, distance, speed, time.
+        For Grade 6 and Grade 7 uniform-motion questions, use plain targets:
+        speed for "find speed", distance for "find distance", and time for
+        "find time". Keep acceleration/SUVAT questions on u, v, a, t, s.
+        Recognize trigger phrases such as average speed, uniform motion,
+        constant speed, starts from rest, comes to rest, travels, covers,
+        journey, walks, runs, and moves.
         Trigger phrases must be copied from phrases present in the problem text.
         Do not infer hidden physics values such as v=0 at maximum height.
         """
@@ -97,7 +139,7 @@ class DSPyPhysicsExtractor:
         return data
 
     def _to_problem(self, text: str, data: dict[str, Any]) -> ExtractedProblem:
-        target = str(data.get("unknown_hint") or data.get("target") or "").strip().lower()
+        target = self._normalize_target(text, str(data.get("unknown_hint") or data.get("target") or ""))
         if target not in SUPPORTED_SYMBOLS:#in physics i can use any symbol right then how is it going to handle thoses cases and isnt this really breakable?
             raise ExtractionError(f"Unsupported or missing target symbol: {target!r}")
 
@@ -106,7 +148,7 @@ class DSPyPhysicsExtractor:
             units = data.get("units", {})
             source_text = data.get("source_text", {})
             for symbol, value in data.get("knowns_raw", {}).items():
-                normalized_symbol = str(symbol).strip().lower()
+                normalized_symbol = self._normalize_symbol(str(symbol))
                 if normalized_symbol not in SUPPORTED_SYMBOLS:
                     continue
                 quantities[normalized_symbol] = Quantity(
@@ -116,7 +158,7 @@ class DSPyPhysicsExtractor:
                     source_text=str(source_text.get(symbol, "")),
                 )
         for item in data.get("quantities", []):
-            symbol = str(item.get("symbol", "")).strip().lower()
+            symbol = self._normalize_symbol(str(item.get("symbol", "")))
             if symbol not in SUPPORTED_SYMBOLS:
                 continue
             try:
@@ -132,6 +174,7 @@ class DSPyPhysicsExtractor:
 
         raw_triggers = data.get("matched_trigger_phrases", data.get("trigger_phrases", []))
         triggers = [str(phrase).strip().lower() for phrase in raw_triggers if str(phrase).strip()]
+        triggers = self._augment_grade_6_7_triggers(text, triggers)
         domain_hint = str(data.get("domain_hint", "kinematics")).strip().lower() or "kinematics"
         return ExtractedProblem(
             raw_text=text,
@@ -140,6 +183,30 @@ class DSPyPhysicsExtractor:
             trigger_phrases=triggers,
             domain_hint=domain_hint,
         )
+
+    def _normalize_target(self, text: str, raw_target: str) -> str:
+        lowered_text = text.lower()
+        for phrase, target in TARGET_PHRASE_MAP.items():
+            if phrase in lowered_text:
+                return self._normalize_symbol(target)
+        return self._normalize_symbol(raw_target)
+
+    def _normalize_symbol(self, symbol: str) -> str:
+        normalized = symbol.strip().lower().replace("_", " ")
+
+        for canonical, aliases in SYMBOL_ALIASES.items():
+            if normalized in aliases:
+                return canonical
+
+        return normalized
+
+    def _augment_grade_6_7_triggers(self, text: str, triggers: list[str]) -> list[str]:
+        seen = set(triggers)
+        for phrase in GRADE_6_7_TRIGGER_PHRASES:
+            if phrase in text.lower() and phrase not in seen:
+                triggers.append(phrase)
+                seen.add(phrase)
+        return triggers
 
     def _normalize_unit(self, unit: str) -> str:
         normalized = unit.lower().replace("seconds", "s").replace("second", "s").replace("sec", "s")
