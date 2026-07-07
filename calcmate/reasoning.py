@@ -5,10 +5,14 @@ from dataclasses import dataclass, replace
 import sympy as sp
 
 from calcmate.constants import UNIT_BY_SYMBOL
+from calcmate.fallback import Fallback, NullFallback
+from calcmate.graph_context import build_reasoning_context
 from calcmate.knowledge_graph import PhysicsKnowledgeGraph
 from calcmate.models import ExtractedProblem, PhaseTrace, Quantity, RetrievedCase, SolutionStep, UnitValidation
 from calcmate.overlay import Overlay
+from calcmate.planning import NullPlanner, Planner, SolutionPlan
 from calcmate.unit_validation import UnitValidator
+from calcmate.verification import DimensionalVerifier
 
 
 class ReasoningError(ValueError):
@@ -33,14 +37,25 @@ class ReasoningResult:
     phase_trace: list[PhaseTrace]
     was_under_constrained: bool = False
     was_contradiction: bool = False
+    was_unresolved: bool = False
 
 
 class PhysicsReasoner:
     """Layer 2. Deterministic graph traversal, SymPy solving, and validation."""
 
-    def __init__(self, graph: PhysicsKnowledgeGraph, unit_validator: UnitValidator | None = None):
+    def __init__(
+        self,
+        graph: PhysicsKnowledgeGraph,
+        unit_validator: UnitValidator | None = None,
+        planner: Planner | None = None,
+        fallback: Fallback | None = None,
+        verifier: DimensionalVerifier | None = None,
+    ):
         self.graph = graph
-        self.unit_validator = unit_validator or UnitValidator()
+        self.verifier = verifier or DimensionalVerifier(unit_validator)
+        self.planner = planner or NullPlanner()
+        self.fallback = fallback or NullFallback()
+        self._fallback_enabled = not isinstance(self.fallback, NullFallback)
 
     def solve(
         self,
@@ -49,11 +64,33 @@ class PhysicsReasoner:
         retrieved_cases: list[RetrievedCase] | None = None,
     ) -> ReasoningResult:
         trace: list[PhaseTrace] = []
-        working_set = self.resolve_domain(problem, trace)#all the equations and constraints pertaining to that domain are loaded 
-        constrained_problem, constraints_fired = self.resolve_constraints(problem, retrieved_cases or [], trace)#all possible implications are made and whether a suitable equation is present or not is also verified,the modified problem with all new implications are returned 
-        raw_steps = self.solve_with_sympy(constrained_problem, working_set, trace)#return SolutionStep(equation_node,law_node,equation,substitution,solved_symbol=problem.target,value,unit)
-        steps = self.reconstruct_solution_path(raw_steps, overlay, trace)#redo the steps based on the overlay
-        unit_validation = self.validate_units(steps[-1], trace)#validates units using dimensionality checking using pint
+        retrieved_cases = list(retrieved_cases or [])
+        working_set = self.resolve_domain(problem, trace)#all the equations and constraints pertaining to that domain are loaded
+        try:
+            return self._solve_core(problem, overlay, working_set, retrieved_cases, trace)
+        except UnderConstrainedError as exc:
+            recovered = self._recover_with_fallback(
+                problem, overlay, working_set, retrieved_cases, trace, exc
+            )
+            if recovered is not None:
+                return recovered
+            if self._fallback_enabled:
+                return self._unresolved_result(problem, trace, exc)
+            raise
+
+    def _solve_core(
+        self,
+        problem: ExtractedProblem,
+        overlay: Overlay,
+        working_set: dict[str, list[tuple[str, dict]]],
+        retrieved_cases: list[RetrievedCase],
+        trace: list[PhaseTrace],
+    ) -> ReasoningResult:
+        constrained_problem, constraints_fired = self.resolve_constraints(problem, retrieved_cases, trace)#all possible implications are made and whether a suitable equation is present or not is also verified
+        plan = self._plan(constrained_problem, retrieved_cases, trace)#LLM (advisory) equation-selection strategy over graph+RAG context
+        raw_steps = self.solve_with_sympy(constrained_problem, working_set, trace, plan)#return SolutionStep(...)
+        steps = self.reconstruct_solution_path(raw_steps, overlay, trace, plan)#redo the steps based on the overlay/plan
+        unit_validation = self.validate_units(steps, constrained_problem, trace)#dimensional balance + unit consistency + final-answer check
         if not unit_validation.is_valid:
             raise ReasoningError(unit_validation.message)
         return ReasoningResult(
@@ -63,6 +100,90 @@ class PhysicsReasoner:
             law_nodes=[step.law_node for step in steps],
             unit_validation=unit_validation,
             phase_trace=trace,
+        )
+
+    def _plan(
+        self,
+        problem: ExtractedProblem,
+        retrieved_cases: list[RetrievedCase],
+        trace: list[PhaseTrace],
+    ) -> SolutionPlan:
+        graph_context = build_reasoning_context(self.graph, problem)
+        plan = self.planner.plan(problem, graph_context, retrieved_cases)
+        if plan.is_empty:
+            detail = "No LLM plan; using deterministic equation search."
+            status = "skipped"
+        else:
+            detail = f"Planner ordered equations {plan.ordered_equations}. {plan.strategy_note}".strip()
+            status = "ok"
+        trace.append(PhaseTrace(phase="4e_planning", status=status, detail=detail))
+        return plan
+
+    def _recover_with_fallback(
+        self,
+        problem: ExtractedProblem,
+        overlay: Overlay,
+        working_set: dict[str, list[tuple[str, dict]]],
+        retrieved_cases: list[RetrievedCase],
+        trace: list[PhaseTrace],
+        exc: UnderConstrainedError,
+    ) -> ReasoningResult | None:
+        if not self._fallback_enabled:
+            return None
+        graph_context = build_reasoning_context(self.graph, problem)
+        proposal = self.fallback.attempt(problem, graph_context, retrieved_cases, str(exc))
+        trace.append(
+            PhaseTrace(
+                phase="5b_llm_fallback",
+                status="ok" if proposal.constraint_ids else "skipped",
+                detail=(
+                    f"Fallback selected graph constraints {proposal.constraint_ids}. {proposal.rationale}".strip()
+                    if proposal.constraint_ids
+                    else "Fallback found no applicable graph constraint."
+                ),
+            )
+        )
+        if proposal.is_empty:
+            return None
+
+        # Apply the graph's own implied values for the selected constraints only.
+        quantities = dict(problem.quantities)
+        fallback_fired: list[str] = []
+        for constraint_id in proposal.constraint_ids:
+            implies = self.graph.node(constraint_id).get("implies", {})
+            self._apply_implied_values(constraint_id, implies, quantities, fallback_fired, override=True)
+        augmented = replace(problem, quantities=quantities)
+
+        try:
+            result = self._solve_core(augmented, overlay, working_set, retrieved_cases, trace)
+        except (UnderConstrainedError, ReasoningError):
+            return None  # still unresolved / unverifiable -> caller reports unresolved
+
+        merged = fallback_fired + [c for c in result.constraints_fired if c not in fallback_fired]
+        return replace(result, constraints_fired=merged)
+
+    def _unresolved_result(
+        self,
+        problem: ExtractedProblem,
+        trace: list[PhaseTrace],
+        exc: Exception,
+    ) -> ReasoningResult:
+        trace.append(
+            PhaseTrace(
+                phase="5c_unresolved",
+                status="blocked",
+                detail=f"No verified solution: {exc}",
+            )
+        )
+        return ReasoningResult(
+            problem=problem,
+            constraints_fired=[],
+            steps=[],
+            law_nodes=[],
+            unit_validation=UnitValidation("", "", False, str(exc)),
+            phase_trace=trace,
+            was_under_constrained=True,
+            was_unresolved=True,
         )
 
     def resolve_domain(self, problem: ExtractedProblem, trace: list[PhaseTrace]) -> dict[str, list[tuple[str, dict]]]:#"Are we solving a kinematics problem?"↓ yes"Load all kinematics equations and constraints."
@@ -143,6 +264,7 @@ class PhysicsReasoner:
         problem: ExtractedProblem,
         working_set: dict[str, list[tuple[str, dict]]],
         trace: list[PhaseTrace],
+        plan: SolutionPlan | None = None,
     ) -> list[SolutionStep]:
         MAX_ITER = 20
         knowns: set[str] = set(problem.quantities.keys())
@@ -150,6 +272,7 @@ class PhysicsReasoner:
 
         for iteration in range(MAX_ITER):                              # Stop 3: safety limit
             enabled = self._find_enabled_equations(knowns, working_set["equations"])
+            enabled = self._order_by_plan(enabled, plan)               # advisory equation ordering
 
             new_discoveries = False
             for node_id, attrs, sym in enabled:
@@ -165,11 +288,12 @@ class PhysicsReasoner:
                     continue
 
                 knowns.add(sym)
+                derived_value = step.raw_value if step.raw_value is not None else step.value
                 problem = replace(
                     problem,
                     quantities={
                         **problem.quantities,
-                        sym: Quantity(sym, step.value, step.unit, source_text="derived"),
+                        sym: Quantity(sym, derived_value, step.unit, source_text="derived"),
                     },
                 )
                 solution_steps.append(step)
@@ -212,6 +336,7 @@ class PhysicsReasoner:
         steps: list[SolutionStep],
         overlay: Overlay,
         trace: list[PhaseTrace],
+        plan: SolutionPlan | None = None,
     ) -> list[SolutionStep]:
         # The last step always solves the target; earlier steps are intermediates.
         target_sym = steps[-1].solved_symbol
@@ -222,8 +347,14 @@ class PhysicsReasoner:
         if not allowed:
             raise ReasoningError("All candidate equations were blocked by overlay.")
 
-        priority = {node_id: idx for idx, node_id in enumerate(overlay.equation_priority)}
-        best = sorted(allowed, key=lambda s: priority.get(s.equation_node, 999))[0]
+        # A non-empty LLM plan (verified downstream) takes precedence over the
+        # overlay's static priority for choosing among valid answer equations.
+        if plan is not None and not plan.is_empty:
+            plan_rank = {node_id: idx for idx, node_id in enumerate(plan.ordered_equations)}
+            best = sorted(allowed, key=lambda s: plan_rank.get(s.equation_node, 10_000))[0]
+        else:
+            priority = {node_id: idx for idx, node_id in enumerate(overlay.equation_priority)}
+            best = sorted(allowed, key=lambda s: priority.get(s.equation_node, 999))[0]
 
         if overlay.show_intermediate_steps and overlay.structure == "multi_step":
             chosen = intermediate + [best]
@@ -239,16 +370,37 @@ class PhysicsReasoner:
         )
         return chosen
 
-    def validate_units(self, step: SolutionStep, trace: list[PhaseTrace]) -> UnitValidation:#validates units using dimensionality checking using pint
-        validation = self.unit_validator.validate(step)
+    def validate_units(
+        self,
+        steps: list[SolutionStep],
+        problem: ExtractedProblem,
+        trace: list[PhaseTrace],
+    ) -> UnitValidation:
+        # Dimensional balance of every equation + per-substitution unit
+        # consistency + the original final-answer dimensionality check.
+        report = self.verifier.verify(steps, problem.quantities)
         trace.append(
             PhaseTrace(
                 phase="7_unit_validation",
-                status="ok" if validation.is_valid else "blocked",
-                detail=validation.message,
+                status="ok" if report.is_valid else "blocked",
+                detail=report.summary(),
             )
         )
-        return validation
+        if not report.is_valid:
+            # Surface the strengthened verdict (which may fail even when the
+            # final unit alone looks fine) to the verified-only gate upstream.
+            return replace(report.final_answer, is_valid=False, message=report.summary())
+        return report.final_answer
+
+    def _order_by_plan(
+        self,
+        enabled: list[tuple[str, dict, str]],
+        plan: SolutionPlan | None,
+    ) -> list[tuple[str, dict, str]]:
+        if plan is None or plan.is_empty:
+            return enabled
+        rank = {node_id: idx for idx, node_id in enumerate(plan.ordered_equations)}
+        return sorted(enabled, key=lambda item: rank.get(item[0], 10_000))
 
     def _apply_trigger_constraints(
         self,
@@ -272,7 +424,10 @@ class PhysicsReasoner:
     ) -> None:
         current_signature = set(problem.quantities)
         for case in retrieved_cases:
-            if case.score < 2 or case.unknown != problem.target:#condition to accept implications from a similar case
+            # Gate on the *structural* signal (shared symbols + unknown + domain),
+            # which survives regardless of how a hybrid retriever fuses its scores.
+            structural = case.score_breakdown.get("structural", case.score)
+            if structural < 2 or case.unknown != problem.target:#condition to accept implications from a similar case
                 continue
             if not current_signature & case.known_symbols:#set intersection btwn the question quantities and the retrieved case symbols...if not even one matches then continue
                 continue
@@ -383,6 +538,7 @@ class PhysicsReasoner:
             solved_symbol=target,
             value=round(value, 4),
             unit=UNIT_BY_SYMBOL.get(target, ""),
+            raw_value=float(value),
         )
 
     def _choose_root(self, unknown: str, solved: list[sp.Expr]) -> float:

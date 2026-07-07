@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import replace
 from typing import Protocol
 
 from calcmate.extraction import DSPyPhysicsExtractor
+from calcmate.fallback import DSPyReasoningFallback, Fallback
 from calcmate.knowledge_graph import load_default_graph
+from calcmate.llm_config import reasoning_enabled
 from calcmate.models import AttemptLog, ExtractedProblem, PhaseTrace, Solution, SolutionStep, UnitValidation
 from calcmate.narration import Narrator
 from calcmate.overlay import load_overlay
+from calcmate.planning import DSPySolutionPlanner, Planner
 from calcmate.postgres_logging import AttemptLogger, NoopAttemptLogger
 from calcmate.reasoning import PhysicsReasoner, ReasoningResult
 from calcmate.retrieval import CaseRetriever, FaissCaseRetriever, InMemoryCaseRetriever
+from calcmate.units import convert, parse_requested_unit, to_si
 
 
 class Extractor(Protocol):
@@ -34,13 +37,35 @@ class CalcMatePipeline:
         retriever: CaseRetriever | None = None,
         narrator: Narrator | None = None,
         attempt_logger: AttemptLogger | None = None,
+        planner: Planner | None = None,
+        fallback: Fallback | None = None,
     ) -> None:
         graph = load_default_graph()
         self.extractor = extractor or DSPyPhysicsExtractor()
         self.retriever = retriever or self._default_retriever()
-        self.reasoner = PhysicsReasoner(graph)
+        planner = planner or self._default_planner()
+        fallback = fallback or self._default_fallback()
+        self.reasoner = PhysicsReasoner(graph, planner=planner, fallback=fallback)
         self.narrator = narrator or Narrator()
         self.attempt_logger = attempt_logger or NoopAttemptLogger()
+
+    def _default_planner(self) -> Planner | None:
+        # Only engage the LLM planner when reasoning is explicitly enabled and a
+        # key is present; otherwise stay fully deterministic (NullPlanner).
+        if not reasoning_enabled():
+            return None
+        try:
+            return DSPySolutionPlanner()
+        except Exception:  # noqa: BLE001 - never block solving on planner setup
+            return None
+
+    def _default_fallback(self) -> Fallback | None:
+        if not reasoning_enabled():
+            return None
+        try:
+            return DSPyReasoningFallback()
+        except Exception:  # noqa: BLE001
+            return None
 
     def _default_retriever(self) -> CaseRetriever:
         backend = os.environ.get("CALCMATE_RETRIEVAL_BACKEND", "memory").lower()
@@ -56,13 +81,19 @@ class CalcMatePipeline:
         phase_trace: list[PhaseTrace] = []#this list is used to track which values you got in which phase?
 
         extracted = self._phase_1_extract(text, phase_trace)#return ExtractedProblem(raw_text=text,quantities=quantities,target=target,trigger_phrases=triggers,domain_hint=domain_hint,)  this is wat is store inside extracted and phase list contains a few details of this extraction
+        extracted = self._phase_1b_normalize_units(extracted, phase_trace)#convert every known to its SI unit so arithmetic and unit labels agree
         retrieved_cases = self._phase_2_retrieve(extracted, phase_trace)# this is wat the retrieved cases contain RetrievedCase(case_id=case.case_id,problem_text=case.problem_text,known_symbols=case.known_symbols,unknown=case.unknown,domain=case.domain,constraints_fired=case.constraints_fired,implied_values=case.implied_values,equations_used=case.equations_used,law_nodes=case.law_nodes,score=float(score),)
         reasoning = self.reasoner.solve(extracted, overlay, retrieved_cases) ##return ReasoningResult(problem,constraints_fired,steps,law_nodesunit_validation,phase_trace,)
+        if reasoning.was_unresolved:
+            phase_trace.extend(reasoning.phase_trace)
+            solution = self._build_unresolved_solution(reasoning, overlay.overlay_id, retrieved_cases, phase_trace)
+            self._phase_9_log(solution, phase_trace)
+            return solution
         reasoning = self._apply_requested_output_unit(reasoning)
         phase_trace.extend(reasoning.phase_trace)# a copy of the phase trace
         narration = self._phase_8_narrate(reasoning, overlay, phase_trace)#explanation for answer has been fetched from llm or fallback method
         solution = self._build_solution(reasoning, overlay.overlay_id, retrieved_cases, narration, phase_trace)#jst a class to structure the answer
-        self._phase_9_log(solution, phase_trace)#the final log 
+        self._phase_9_log(solution, phase_trace)#the final log
         return solution
 
     def _phase_1_extract(self, text: str, trace: list[PhaseTrace]) -> ExtractedProblem:
@@ -78,6 +109,24 @@ class CalcMatePipeline:
             )
         )
         return extracted
+
+    def _phase_1b_normalize_units(self, extracted: ExtractedProblem, trace: list[PhaseTrace]) -> ExtractedProblem:
+        changed: list[str] = []
+        normalized_quantities = {}
+        for symbol, quantity in extracted.quantities.items():
+            si_value, si_unit = to_si(quantity.value, quantity.unit, symbol)
+            if si_unit != quantity.unit or si_value != quantity.value:
+                changed.append(f"{symbol}: {quantity.value:g} {quantity.unit} -> {si_value:g} {si_unit}")
+            normalized_quantities[symbol] = replace(quantity, value=si_value, unit=si_unit)
+        normalized = replace(extracted, quantities=normalized_quantities)
+        trace.append(
+            PhaseTrace(
+                phase="1b_unit_normalization",
+                status="ok",
+                detail=("Converted to SI -> " + "; ".join(changed)) if changed else "All inputs already in SI units.",
+            )
+        )
+        return normalized
 
     def _phase_2_retrieve(self, extracted: ExtractedProblem, trace: list[PhaseTrace]):#gets similar embeddings/matches by domain matching or some other parameter
         cases = self.retriever.retrieve(extracted, top_k=3)
@@ -133,30 +182,18 @@ class CalcMatePipeline:
         return replace(reasoning, steps=steps, unit_validation=unit_validation, phase_trace=trace)
 
     def _requested_output_unit(self, text: str) -> str | None:
-        lowered = text.lower()
-        patterns = [
-            (r"\bin\s+(?:centimeters?|centimetres?|cm)\b", "cm"),
-            (r"\bin\s+(?:kilometers?|kilometres?|km)\b", "km"),
-            (r"\bin\s+(?:meters?|metres?)\b", "m"),
-        ]
-        for pattern, unit in patterns:
-            if re.search(pattern, lowered):
-                return unit
-        return None
+        return parse_requested_unit(text)
 
     def _convert_step_unit(self, step: SolutionStep, requested_unit: str) -> SolutionStep | None:
-        length_conversions = {
-            ("m", "cm"): 100.0,
-            ("m", "km"): 0.001,
-            ("cm", "m"): 0.01,
-            ("km", "m"): 1000.0,
-        }
         if step.unit == requested_unit:
             return step
-        factor = length_conversions.get((step.unit, requested_unit))
-        if factor is None:
+        # Convert from the full-precision value so the result is not degraded by
+        # the 4-dp display rounding already applied to ``step.value``.
+        base_value = step.raw_value if step.raw_value is not None else step.value
+        converted = convert(base_value, step.unit, requested_unit)
+        if converted is None:
             return None
-        return replace(step, value=round(step.value * factor, 4), unit=requested_unit)
+        return replace(step, value=round(converted, 4), unit=requested_unit, raw_value=converted)
 
     def _phase_8_narrate(self, reasoning: ReasoningResult, overlay, trace: list[PhaseTrace]) -> str:
         narration = self.narrator.narrate(
@@ -183,6 +220,7 @@ class CalcMatePipeline:
                 constraints_fired=solution.applied_constraints,
                 was_under_constrained=solution.was_under_constrained,
                 was_contradiction=solution.was_contradiction,
+                was_unresolved=solution.was_unresolved,
             )
         )
         trace.append(
@@ -191,6 +229,44 @@ class CalcMatePipeline:
                 status="ok",
                 detail="Prepared output and recorded attempt log.",
             )
+        )
+
+    def _build_unresolved_solution(
+        self,
+        reasoning: ReasoningResult,
+        overlay_id: str,
+        retrieved_cases,
+        phase_trace: list[PhaseTrace],
+    ) -> Solution:
+        target = reasoning.problem.target
+        narration = (
+            f"Could not produce a verified answer for {target!r}. "
+            "The problem appears under-constrained and no verified fallback was found. "
+            "Human review is recommended."
+        )
+        phase_trace.append(
+            PhaseTrace(
+                phase="8_narration",
+                status="skipped",
+                detail="No verified solution to narrate.",
+            )
+        )
+        return Solution(
+            problem=reasoning.problem,
+            overlay_id=overlay_id,
+            applied_constraints=reasoning.constraints_fired,
+            steps=[],
+            answer_symbol=target,
+            answer_value=None,
+            answer_unit="",
+            law_nodes=reasoning.law_nodes,
+            narration=narration,
+            retrieved_cases=retrieved_cases,
+            unit_validation=reasoning.unit_validation,
+            phase_trace=phase_trace,
+            was_under_constrained=reasoning.was_under_constrained,
+            was_contradiction=reasoning.was_contradiction,
+            was_unresolved=True,
         )
 
     def _build_solution(

@@ -7,8 +7,11 @@ This draft includes one chapter: **Motion in a Straight Line / Kinematics**.
 ## What is included
 
 - Layer 1 extraction boundary: DSPy + Groq extracts quantities, units, unknown hint, domain hint, and matched trigger phrases.
-- Nine-phase pipeline skeleton: extraction, retrieval, domain resolution, constraint resolution, SymPy solving, path reconstruction, unit validation, narration, and logging.
-- Layer 2 reasoning engine: loads the chapter graph, applies graph/CBR/meta constraints, passes chapter equations through SymPy, reconstructs the path, and validates units.
+- Integrated neuro-symbolic RAG pipeline: extraction, hybrid retrieval, domain resolution, constraint resolution, **LLM planning**, SymPy solving, **LLM reasoning fallback**, path reconstruction, dimensional verification, narration, and logging.
+- Layer 2 reasoning engine: loads the chapter graph, applies graph/CBR/meta constraints, plans an equation strategy from graph + retrieved-example context, passes chapter equations through SymPy, reconstructs the path, and verifies dimensions.
+- Verified-only trust model: the planning and fallback LLM stages are advisory. The planner may only reorder graph equations; the fallback may only select existing graph constraints. Every LLM proposal is re-checked by the deterministic solver and verifier, so an LLM guess can never become an unverified answer. Genuinely unsolvable problems return a structured `was_unresolved` result instead of a wrong number.
+- Hybrid retrieval: `FaissCaseRetriever` fuses semantic (embedding) and structural signals; `InMemoryCaseRetriever` fuses a lexical-semantic signal with structural overlap, so hybrid behaviour is available offline. Retrieved worked examples are injected into the planning and fallback reasoning prompts (RAG).
+- Stronger verification: dimensional balance of every equation used, per-substitution unit consistency, and the final-answer dimensionality check.
 - Layer 3 narration boundary: DSPy narrator rewrites verified steps only, with a deterministic fallback for local tests.
 - FAISS/Chroma-style retrieval interface with an in-memory placeholder case store.
 - Optional FAISS-backed retrieval over a solved-case JSONL dataset in `data/cases/`.
@@ -47,6 +50,18 @@ Set this to disable the DSPy narrator and use the deterministic template narrato
 
 ```powershell
 $env:CALCMATE_USE_DSPY_NARRATOR="0"
+```
+
+The reasoning stages (planning + fallback) use a stronger model on the same DSPy + Groq boundary. They are enabled only when a key is present; disable them to stay fully deterministic:
+
+```powershell
+$env:CALCMATE_USE_LLM_REASONING="0"
+```
+
+Override the reasoning model (default `llama-3.3-70b-versatile`):
+
+```powershell
+$env:CALCMATE_REASONING_MODEL="llama-3.3-70b-versatile"
 ```
 
 Open:

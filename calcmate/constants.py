@@ -5,6 +5,21 @@ UNIT_BY_SYMBOL = {
     "t": "s",
     "s": "m",
 }
+
+# Pint-parseable canonical dimension for every symbol that can appear in a
+# graph equation. Used by the DimensionalVerifier to check that each equation
+# is dimensionally balanced (LHS dimension == RHS dimension) and that every
+# substituted quantity carries a dimensionally consistent unit.
+SYMBOL_DIMENSIONS = {
+    "u": "meter/second",
+    "v": "meter/second",
+    "a": "meter/second**2",
+    "t": "second",
+    "s": "meter",
+    "speed": "meter/second",
+    "distance": "meter",
+    "time": "second",
+}
 CANONICAL_SYMBOLS = {
     "u",
     "v",
@@ -35,6 +50,7 @@ SYMBOL_ALIASES = {
     },
     "s": {
         "s",
+        "d",
         "distance",
         "distance travelled",
         "distance traveled",

@@ -13,8 +13,14 @@ def _build_narration_signature():#initializing dspy and telling it clearly wat t
     class NarrateVerifiedSolution(dspy.Signature):
         """Rewrite a verified physics solution for a student.
 
-        You may only use the supplied verified_solution_json. Do not add
-        equations, do not change numbers, and do not infer missing physics.
+        You may only use the supplied verified_solution_json. State the given
+        values, the equation used, and the final answer EXACTLY as provided.
+
+        Hard rules:
+        - Do NOT convert units. The answer's unit is already correct.
+        - Do NOT recompute, re-derive, or double-check any number.
+        - Do NOT question, dispute, or flag the answer as wrong; it is verified.
+        - Do NOT introduce any number that is not in verified_solution_json.
         Match the requested institution style.
         """
 
@@ -58,9 +64,35 @@ class Narrator:
         if self.narrate_program is not None:#if dspy narrator is available
             prediction = self.narrate_program(verified_solution_json=json.dumps(payload))#answer from llm
             narration = getattr(prediction, "narration", "").strip()
-            if narration:
+            if narration and self._is_faithful(narration, steps):
                 return narration
-        return self._template_narration(problem, overlay, constraints, steps)#fallback method if llm is not connected
+        return self._template_narration(problem, overlay, constraints, steps)#fallback method if llm is not connected (or the LLM narration was unfaithful)
+
+    def _is_faithful(self, narration: str, steps: list[SolutionStep]) -> bool:
+        """Reject LLM narration that disputes or diverges from the verified answer.
+
+        Guards against the failure mode where the narrator re-derives the answer,
+        invents a unit conversion, and then contradicts the verified value.
+        """
+        text = narration.lower()
+        contradiction_cues = (
+            "error",
+            "discrepancy",
+            "however",
+            "seems",
+            "incorrect",
+            "mistake",
+            "should be",
+            "does not match",
+            "doesn't match",
+            "wrong",
+            "actually",
+        )
+        if any(cue in text for cue in contradiction_cues):
+            return False
+        final = steps[-1]
+        # The verified final value must appear (so the narration is about it).
+        return f"{final.value:g}".lower() in text.replace(",", "")
 
     def _verified_payload(
         self,

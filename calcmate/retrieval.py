@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Protocol
@@ -58,16 +59,48 @@ def load_cases_jsonl(path: Path | str) -> list[RetrievedCase]:
                 equations_used=list(data.get("equations_used", [])),
                 law_nodes=list(data.get("law_nodes", [])),
                 score=float(data.get("score", 0.0)),
+                solution_steps=list(data.get("solution_steps", [])),
+                final_answer=dict(data.get("final_answer", {})),
             )
         )
     return cases
 
 
-class InMemoryCaseRetriever:
-    """Simple fallback retriever used in tests and when FAISS is unavailable."""
+def _tokenize(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]+", text.lower()) if len(token) > 2}
 
-    def __init__(self, cases: list[RetrievedCase] | None = None) -> None:
-        self.cases = cases or self._default_cases()
+
+def _lexical_similarity(query_text: str, case_text: str) -> float:
+    """Jaccard token overlap -- a lightweight semantic signal with no model."""
+    query_tokens = _tokenize(query_text)
+    case_tokens = _tokenize(case_text)
+    if not query_tokens or not case_tokens:
+        return 0.0
+    intersection = len(query_tokens & case_tokens)
+    union = len(query_tokens | case_tokens)
+    return intersection / union if union else 0.0
+
+
+class InMemoryCaseRetriever:
+    """Hybrid fallback retriever used in tests and when FAISS is unavailable.
+
+    Combines a lexical *semantic* signal (token overlap between the problem
+    texts) with a *structural* signal (shared symbols, matching unknown and
+    domain). This mirrors the semantic+structural fusion of
+    :class:`FaissCaseRetriever` without requiring an embedding model, so hybrid
+    retrieval behaviour is available offline.
+    """
+
+    def __init__(
+        self,
+        cases: list[RetrievedCase] | None = None,
+        semantic_weight: float = 0.5,
+        structural_weight: float = 0.5,
+    ) -> None:
+        # Distinguish an explicit empty list (no cases) from None (use defaults).
+        self.cases = self._default_cases() if cases is None else cases
+        self.semantic_weight = semantic_weight
+        self.structural_weight = structural_weight
 
     def retrieve(self, problem: ExtractedProblem, top_k: int = 3) -> list[RetrievedCase]:
         query_known = set(problem.quantities)
@@ -76,9 +109,14 @@ class InMemoryCaseRetriever:
             structural_overlap = len(query_known & case.known_symbols)
             unknown_match = 1 if problem.target == case.unknown else 0
             domain_match = 1 if problem.domain_hint == case.domain else 0
-            score = structural_overlap + unknown_match + domain_match
-            if score <= 0:
+            structural = structural_overlap + unknown_match + domain_match
+            semantic = _lexical_similarity(problem.raw_text, case.problem_text)
+            if structural <= 0 and semantic <= 0:
                 continue
+            # Normalise structural to ~[0,1] before fusing so the weights are
+            # meaningful; keep the structural integer available in the breakdown.
+            structural_norm = structural / (len(case.known_symbols) + 2 or 1)
+            total = self.semantic_weight * semantic + self.structural_weight * structural_norm
             scored.append(
                 RetrievedCase(
                     case_id=case.case_id,
@@ -90,7 +128,14 @@ class InMemoryCaseRetriever:
                     implied_values=case.implied_values,
                     equations_used=case.equations_used,
                     law_nodes=case.law_nodes,
-                    score=float(score),
+                    score=float(total),
+                    solution_steps=case.solution_steps,
+                    final_answer=case.final_answer,
+                    score_breakdown={
+                        "semantic": round(semantic, 4),
+                        "structural": float(structural),
+                        "structural_norm": round(structural_norm, 4),
+                    },
                 )
             )
         return sorted(scored, key=lambda case: case.score, reverse=True)[:top_k]
@@ -181,6 +226,12 @@ class FaissCaseRetriever:
                     equations_used=case.equations_used,
                     law_nodes=case.law_nodes,
                     score=total_score,
+                    solution_steps=case.solution_steps,
+                    final_answer=case.final_answer,
+                    score_breakdown={
+                        "semantic": round(semantic_score, 4),
+                        "structural": float(structural_score),
+                    },
                 )
             )
         return sorted(candidates, key=lambda case: case.score, reverse=True)[:top_k]

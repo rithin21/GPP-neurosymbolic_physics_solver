@@ -123,6 +123,11 @@ class DSPyPhysicsExtractor:
         prediction = self.extract_program(problem_text=text)#feeding input to dspy
         raw_json = getattr(prediction, "extraction_json", "")#Get prediction.extraction_json if it exists.If it does not exist, use "" instead.
         data = self._parse_json(raw_json)#cleaning the output and converting to a dict style
+
+        print("\n========== RAW LLM OUTPUT ==========")
+        print(data)
+        print("====================================\n")
+        
         return self._to_problem(text, data)#format the answer into ExtractedProblem class 
 
     def _parse_json(self, raw_json: str) -> dict[str, Any]:
@@ -148,7 +153,13 @@ class DSPyPhysicsExtractor:
             units = data.get("units", {})
             source_text = data.get("source_text", {})
             for symbol, value in data.get("knowns_raw", {}).items():
+                
+                print(f"\nRAW SYMBOL: {symbol}")
                 normalized_symbol = self._normalize_symbol(str(symbol))
+                print(f"NORMALIZED SYMBOL: {normalized_symbol}")
+                print(f"SUPPORTED: {normalized_symbol in SUPPORTED_SYMBOLS}")
+
+
                 if normalized_symbol not in SUPPORTED_SYMBOLS:
                     continue
                 quantities[normalized_symbol] = Quantity(
@@ -160,7 +171,13 @@ class DSPyPhysicsExtractor:
         for item in data.get("quantities", []):
             symbol = self._normalize_symbol(str(item.get("symbol", "")))
             if symbol not in SUPPORTED_SYMBOLS:
+
+                print(f"RAW SYMBOL: {symbol}")
+                print(f"NORMALIZED: {normalized_symbol}")
+                print(f"SUPPORTED: {normalized_symbol in SUPPORTED_SYMBOLS}")
+                print(f"ALL SUPPORTED SYMBOLS: {SUPPORTED_SYMBOLS}")
                 continue
+
             try:
                 value = float(item["value"])
             except (KeyError, TypeError, ValueError) as exc:
