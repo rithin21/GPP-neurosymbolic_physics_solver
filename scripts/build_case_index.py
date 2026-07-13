@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
-from calcmate.retrieval import FaissCaseRetriever
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from calcmate.retrieval import FaissCaseRetriever  # noqa: E402
 
 
 def main() -> None:
@@ -11,8 +14,8 @@ def main() -> None:
     parser.add_argument(
         "--cases",
         type=Path,
-        default=Path("data/cases/kinematics_cases.jsonl"),
-        help="Path to the solved-cases JSONL file.",
+        default=Path("data/cases/kinematics"),
+        help="Path to a solved-cases JSONL file or a chapter directory of them.",
     )
     parser.add_argument(
         "--index",
@@ -41,12 +44,10 @@ def main() -> None:
         embedding_model=args.model,
     )
 
-    print("Cases file:", args.cases)
-    print("Number of lines:", len(args.cases.read_text(encoding="utf-8").splitlines()))
-
-    print("Total cases:", len(cases))
-    for c in cases[:5]:
-        print(c.case_id)
+    print("Cases source:", args.cases)
+    print("Total cases loaded:", len(retriever.cases))
+    for case in retriever.cases[:5]:
+        print(" ", case.case_id)
 
     retriever.build_index()
     print(f"Built FAISS index at {args.index}")

@@ -11,6 +11,8 @@ from calcmate.models import ExtractedProblem, RetrievedCase
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASE_DIR = PROJECT_ROOT / "data" / "cases"
+# New-schema corpus lives one directory per chapter; every *.jsonl in it is loaded.
+DEFAULT_CASE_CHAPTER_DIR = DEFAULT_CASE_DIR / "kinematics"
 DEFAULT_CASES_JSONL = DEFAULT_CASE_DIR / "kinematics_cases.jsonl"
 DEFAULT_FAISS_INDEX = DEFAULT_CASE_DIR / "kinematics_cases.faiss"
 DEFAULT_FAISS_META = DEFAULT_CASE_DIR / "kinematics_cases.meta.json"
@@ -40,6 +42,52 @@ def case_to_text(case: RetrievedCase | dict) -> str:
     return " | ".join(parts)
 
 
+def _case_from_new_schema(data: dict) -> RetrievedCase:
+    """Map a schema-v2 case (givens/target/reasoning_program) to a RetrievedCase.
+
+    Structural fields (constraints_fired/equations_used/law_nodes) are derived
+    from the opcode program, so retrieval stays graph-consistent by construction.
+    """
+    program = data.get("reasoning_program", [])
+    laws = [op["law"] for op in program if op.get("op") == "identify_law"]
+    equations = [op["equation"] for op in program if op.get("op") == "solve_equation"]
+    constraints = [op["constraint"] for op in program if op.get("op") == "apply_constraint"]
+    givens = data.get("givens", {})
+    target = data.get("target", {})
+    return RetrievedCase(
+        case_id=data["case_id"],
+        problem_text=data["problem_text"],
+        known_symbols=set(givens.keys()),
+        unknown=target.get("symbol", ""),
+        domain=data.get("chapter", "kinematics"),
+        constraints_fired=constraints,
+        implied_values={},
+        equations_used=equations,
+        law_nodes=laws,
+        score=float(data.get("score", 0.0)),
+        solution_steps=list(data.get("solution_steps", [])),
+        final_answer=dict(data.get("final_answer", {})),
+        reasoning_program=list(program),
+    )
+
+
+def _case_from_old_schema(data: dict) -> RetrievedCase:
+    return RetrievedCase(
+        case_id=data["case_id"],
+        problem_text=data["problem_text"],
+        known_symbols=set(data["known_symbols"]),
+        unknown=data["unknown"],
+        domain=data.get("domain", data.get("chapter")),
+        constraints_fired=list(data.get("constraints_fired", [])),
+        implied_values=dict(data.get("implied_values", {})),
+        equations_used=list(data.get("equations_used", [])),
+        law_nodes=list(data.get("law_nodes", [])),
+        score=float(data.get("score", 0.0)),
+        solution_steps=list(data.get("solution_steps", [])),
+        final_answer=dict(data.get("final_answer", {})),
+    )
+
+
 def load_cases_jsonl(path: Path | str) -> list[RetrievedCase]:
     cases: list[RetrievedCase] = []
     for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -47,22 +95,18 @@ def load_cases_jsonl(path: Path | str) -> list[RetrievedCase]:
         if not line:
             continue
         data = json.loads(line)
-        cases.append(
-            RetrievedCase(
-                case_id=data["case_id"],
-                problem_text=data["problem_text"],
-                known_symbols=set(data["known_symbols"]),
-                unknown=data["unknown"],
-                domain=data.get("domain", data.get("chapter")),
-                constraints_fired=list(data.get("constraints_fired", [])),
-                implied_values=dict(data.get("implied_values", {})),
-                equations_used=list(data.get("equations_used", [])),
-                law_nodes=list(data.get("law_nodes", [])),
-                score=float(data.get("score", 0.0)),
-                solution_steps=list(data.get("solution_steps", [])),
-                final_answer=dict(data.get("final_answer", {})),
-            )
-        )
+        if "reasoning_program" in data or "givens" in data:
+            cases.append(_case_from_new_schema(data))
+        else:
+            cases.append(_case_from_old_schema(data))
+    return cases
+
+
+def load_cases_dir(directory: Path | str) -> list[RetrievedCase]:
+    """Load and concatenate every ``*.jsonl`` file in a chapter case directory."""
+    cases: list[RetrievedCase] = []
+    for path in sorted(Path(directory).glob("*.jsonl")):
+        cases.extend(load_cases_jsonl(path))
     return cases
 
 
@@ -131,6 +175,7 @@ class InMemoryCaseRetriever:
                     score=float(total),
                     solution_steps=case.solution_steps,
                     final_answer=case.final_answer,
+                    reasoning_program=case.reasoning_program,
                     score_breakdown={
                         "semantic": round(semantic, 4),
                         "structural": float(structural),
@@ -167,7 +212,7 @@ class FaissCaseRetriever:
 
     def __init__(
         self,
-        cases_path: Path | str = DEFAULT_CASES_JSONL,
+        cases_path: Path | str = DEFAULT_CASE_CHAPTER_DIR,
         index_path: Path | str = DEFAULT_FAISS_INDEX,
         meta_path: Path | str = DEFAULT_FAISS_META,
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
@@ -176,7 +221,11 @@ class FaissCaseRetriever:
         self.index_path = Path(index_path)
         self.meta_path = Path(meta_path)
         self.embedding_model_name = embedding_model
-        self.cases = load_cases_jsonl(self.cases_path)
+        # cases_path may be a directory (load every chapter file) or a single file.
+        if self.cases_path.is_dir():
+            self.cases = load_cases_dir(self.cases_path)
+        else:
+            self.cases = load_cases_jsonl(self.cases_path)
 
         print("\n========== RETRIEVER INIT ==========")
         print("Cases path:", self.cases_path)
@@ -228,6 +277,7 @@ class FaissCaseRetriever:
                     score=total_score,
                     solution_steps=case.solution_steps,
                     final_answer=case.final_answer,
+                    reasoning_program=case.reasoning_program,
                     score_breakdown={
                         "semantic": round(semantic_score, 4),
                         "structural": float(structural_score),

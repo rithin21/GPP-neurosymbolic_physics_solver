@@ -75,6 +75,9 @@ class RetrievedCase:
     score: float
     solution_steps: list[str] = field(default_factory=list)
     final_answer: dict[str, Any] = field(default_factory=dict)
+    # The gold opcode program (new-schema cases). Injected into planner/fallback
+    # prompts as a worked example.
+    reasoning_program: list[dict[str, Any]] = field(default_factory=list)
     # Optional decomposition of ``score`` into its hybrid components, populated
     # by retrievers that combine semantic and structural signals.
     score_breakdown: dict[str, float] = field(default_factory=dict)

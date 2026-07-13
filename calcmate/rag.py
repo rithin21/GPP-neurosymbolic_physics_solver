@@ -27,6 +27,14 @@ def format_retrieved_examples(cases: list[RetrievedCase], max_examples: int = 3)
             f"  equations_used: {case.equations_used}",
             f"  law_nodes: {case.law_nodes}",
         ]
+        if case.reasoning_program:
+            program = ", ".join(
+                op.get("op", "?")
+                + (f"({op.get('equation') or op.get('constraint') or op.get('law') or op.get('symbol') or ''})"
+                   if op.get("op") != "verify" else "")
+                for op in case.reasoning_program
+            )
+            lines.append(f"  reasoning_program: {program}")
         if case.solution_steps:
             steps = "; ".join(str(step) for step in case.solution_steps)
             lines.append(f"  solution_steps: {steps}")
