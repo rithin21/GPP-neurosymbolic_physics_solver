@@ -324,6 +324,7 @@ class DSPyPhysicsExtractor:
 
         raw_triggers = data.get("matched_trigger_phrases", data.get("trigger_phrases", []))
         triggers = [str(phrase).strip().lower() for phrase in raw_triggers if str(phrase).strip()]
+        triggers = self._augment_grade_6_7_triggers(text, triggers)
         domain_hint = str(data.get("domain_hint", "kinematics")).strip().lower() or "kinematics"
         return ExtractedProblem(
             raw_text=text,

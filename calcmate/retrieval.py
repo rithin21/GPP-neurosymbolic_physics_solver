@@ -52,7 +52,7 @@ def load_cases_jsonl(path: Path | str) -> list[RetrievedCase]:
                 problem_text=data["problem_text"],
                 known_symbols=set(data["known_symbols"]),
                 unknown=data["unknown"],
-                domain=data["domain"],
+                domain=data.get("domain", data.get("chapter")),
                 constraints_fired=list(data.get("constraints_fired", [])),
                 implied_values=dict(data.get("implied_values", {})),
                 equations_used=list(data.get("equations_used", [])),
