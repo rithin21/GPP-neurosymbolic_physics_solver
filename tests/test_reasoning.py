@@ -82,13 +82,50 @@ class ReasoningTests(unittest.TestCase):
 
         phases = [trace.phase for trace in solution.phase_trace]
         self.assertIn("1_extraction", phases)
-        self.assertIn("2_hybrid_retrieval", phases)
         self.assertIn("5_sympy_solving", phases)
         self.assertIn("7_unit_validation", phases)
         self.assertIn("8_narration", phases)
         self.assertIn("9_output_and_logging", phases)
         self.assertIsNotNone(solution.unit_validation)
         self.assertTrue(solution.unit_validation.is_valid)
+
+        # The graph solver reached the target on trigger/meta-rule
+        # constraints alone, so retrieval and case fallback should never
+        # have run.
+        self.assertNotIn("2_hybrid_retrieval", phases)
+        self.assertNotIn("5a_graph_solver_failed", phases)
+        self.assertNotIn("5b_case_fallback_solving", phases)
+        self.assertIsNone(solution.fallback_case_id)
+
+    def test_retrieval_and_case_fallback_only_run_after_graph_solver_fails(self):
+        class UnderConstrainedExtractor:
+            def extract(self, text: str) -> ExtractedProblem:
+                # Only "u" is known and the text carries no trigger phrases,
+                # so neither trigger constraints (4a) nor meta-rules (4c)
+                # can supply the missing symbols - the graph solver must
+                # fail before retrieval is allowed to run at all.
+                return ExtractedProblem(
+                    raw_text="A ball has initial velocity 20 m/s. Find the maximum height.",
+                    target="s",
+                    trigger_phrases=[],
+                    quantities={"u": Quantity("u", 20, "m/s", "initial velocity 20 m/s")},
+                )
+
+        pipeline = CalcMatePipeline(extractor=UnderConstrainedExtractor())
+        solution = pipeline.solve(
+            "A ball has initial velocity 20 m/s. Find the maximum height.",
+            "ncert",
+        )
+
+        phases = [trace.phase for trace in solution.phase_trace]
+        self.assertIn("5a_graph_solver_failed", phases)
+        self.assertIn("2_hybrid_retrieval", phases)
+        self.assertIn("5b_case_fallback_solving", phases)
+
+        # Retrieval must appear only after the graph-solver-failed marker.
+        failed_index = phases.index("5a_graph_solver_failed")
+        retrieval_index = phases.index("2_hybrid_retrieval")
+        self.assertLess(failed_index, retrieval_index)
 
 
 if __name__ == "__main__":

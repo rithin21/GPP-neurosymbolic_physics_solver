@@ -40,6 +40,14 @@ def main() -> None:
         meta_path=args.meta,
         embedding_model=args.model,
     )
+
+    print("Cases file:", args.cases)
+    print("Number of lines:", len(args.cases.read_text(encoding="utf-8").splitlines()))
+
+    print("Total cases:", len(retriever.cases))
+    for c in retriever.cases[:5]:
+        print(c.case_id)
+
     retriever.build_index()
     print(f"Built FAISS index at {args.index}")
     print(f"Wrote metadata at {args.meta}")

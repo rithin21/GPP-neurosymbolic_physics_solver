@@ -113,6 +113,7 @@ class Solution:
     phase_trace: list[PhaseTrace] = field(default_factory=list)
     was_under_constrained: bool = False
     was_contradiction: bool = False
+    fallback_case_id: str | None = None
 
     def to_jsonable(self) -> dict[str, Any]:
         return {
@@ -162,4 +163,5 @@ class Solution:
             ],
             "was_under_constrained": self.was_under_constrained,
             "was_contradiction": self.was_contradiction,
+            "fallback_case_id": self.fallback_case_id,
         }

@@ -8,3 +8,4 @@ pint
 numpy
 sentence-transformers
 faiss-cpu
+torch

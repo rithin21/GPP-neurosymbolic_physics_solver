@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -138,10 +138,16 @@ class FaissCaseRetriever:
         self._load_backend()
 
     def retrieve(self, problem: ExtractedProblem, top_k: int = 3) -> list[RetrievedCase]:
-        query_text = self._query_text(problem)
-        vector = self._embed([query_text])
-        distances, indices = self._index_search(vector, top_k=max(top_k * 4, top_k))
-        candidates: list[RetrievedCase] = []
+        query_text = self._query_text(problem) #returns the problem as a string with all the quantities
+        print("\nQUERY:", query_text)
+
+        vector = self._embed([query_text])#how does it embed?wats the basis?
+        distances, indices = self._index_search(vector, top_k=max(top_k * 4, top_k))#return distances and indexes of the closest embeddings
+
+        print("Indices:", indices)
+        print("Distances:", distances)
+
+        candidates: list[RetrievedCase] = []#get the closest cases and find the total score
         for distance, index in zip(distances[0], indices[0]):
             if index < 0 or index >= len(self.cases):
                 continue
@@ -223,6 +229,106 @@ class FaissCaseRetriever:
                 f"domain: {problem.domain_hint}",
                 f"triggers: {problem.trigger_phrases}",
             ]
+        )
+
+    def _structural_score(self, problem: ExtractedProblem, case: RetrievedCase) -> float:
+        query_known = set(problem.quantities)
+        structural_overlap = len(query_known & case.known_symbols)
+        unknown_match = 1 if problem.target == case.unknown else 0
+        domain_match = 1 if problem.domain_hint == case.domain else 0
+        return float(structural_overlap + unknown_match + domain_match)
+
+
+class TfidfCaseRetriever:
+    """Text-similarity retriever over the same case pool node2vec trains on.
+
+    Loads from calcmate.case_graph.load_all_cases() - the merged
+    data/cases/kinematics_cases.jsonl + kinematics_suvat_cases.jsonl pool -
+    so the seed case this finds and the case-similarity graph that
+    calcmate.fallback_solver expands from are the same database.
+
+    Uses scikit-learn TF-IDF + cosine similarity rather than FAISS: at
+    ~250 cases, brute-force cosine similarity is effectively instant, so
+    there's no approximate-search or index-persistence machinery to justify
+    the extra `sentence-transformers`/`faiss-cpu` dependencies.
+    """
+
+    def __init__(self, cases: list[dict] | None = None) -> None:
+        from calcmate.case_graph import load_all_cases
+
+        raw_cases = cases if cases is not None else load_all_cases()
+        self.cases: list[RetrievedCase] = [self._to_retrieved_case(case) for case in raw_cases]
+        texts = [self._case_text(case) for case in raw_cases]
+
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        self._vectorizer = TfidfVectorizer(stop_words="english") if texts else None
+        self._matrix = self._vectorizer.fit_transform(texts) if texts else None
+
+    def retrieve(self, problem: ExtractedProblem, top_k: int = 3) -> list[RetrievedCase]:
+        if self._matrix is None or not self.cases:
+            return []
+
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        query_vector = self._vectorizer.transform([self._problem_text(problem)])
+        similarities = cosine_similarity(query_vector, self._matrix)[0]
+
+        candidates: list[RetrievedCase] = []
+        for case, semantic_score in zip(self.cases, similarities):
+            structural_score = self._structural_score(problem, case)
+            total_score = float(semantic_score) * 0.7 + structural_score * 0.3
+            if total_score <= 0:
+                continue
+            candidates.append(replace(case, score=total_score))
+
+        return sorted(candidates, key=lambda case: case.score, reverse=True)[:top_k]
+
+    @staticmethod
+    def _problem_text(problem: ExtractedProblem) -> str:
+        return " | ".join(
+            [
+                problem.raw_text,
+                f"knowns: {sorted(problem.quantities)}",
+                f"unknown: {problem.target}",
+                f"domain: {problem.domain_hint}",
+                f"triggers: {' '.join(problem.trigger_phrases)}",
+            ]
+        )
+
+    @staticmethod
+    def _case_text(case: dict) -> str:
+        return " | ".join(
+            str(part)
+            for part in [
+                case.get("problem_text", ""),
+                case.get("concept", ""),
+                case.get("subconcept", ""),
+                case.get("method", ""),
+                " ".join(case.get("trigger_phrases", []) or []),
+                " ".join(case.get("equations_used", []) or []),
+                " ".join(case.get("constraints_fired", []) or []),
+            ]
+        )
+
+    @staticmethod
+    def _known_symbols(case: dict) -> set[str]:
+        # Older records store "symbol=value" strings; newer ones store
+        # plain symbols. Normalize to the bare symbol either way.
+        return {str(raw).split("=")[0].strip() for raw in case.get("known_symbols", []) or []}
+
+    def _to_retrieved_case(self, case: dict) -> RetrievedCase:
+        return RetrievedCase(
+            case_id=case["case_id"],
+            problem_text=case.get("problem_text", ""),
+            known_symbols=self._known_symbols(case),
+            unknown=case.get("unknown", ""),
+            domain=case.get("domain", case.get("chapter", "")),
+            constraints_fired=list(case.get("constraints_fired", []) or []),
+            implied_values=dict(case.get("implied_values", {}) or {}),
+            equations_used=list(case.get("equations_used", []) or []),
+            law_nodes=list(case.get("law_nodes", []) or []),
+            score=0.0,
         )
 
     def _structural_score(self, problem: ExtractedProblem, case: RetrievedCase) -> float:
