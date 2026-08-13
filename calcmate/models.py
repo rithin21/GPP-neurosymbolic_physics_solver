@@ -56,6 +56,16 @@ class SolutionStep:
     solved_symbol: str
     value: float
     unit: str
+    # Set only when phase 7b (pipeline._apply_requested_output_unit) converts
+    # this step's value/unit for display. `substitution` always stays the SI
+    # values actually plugged into `equation` - value/unit alone would then
+    # silently mismatch what substitution+equation produce (e.g. substitution
+    # shows SI inputs but value/unit show a converted-to-km answer, which
+    # doesn't follow from those inputs). These two fields preserve the true
+    # SI-solved number so a narrator (or API consumer) can state both
+    # honestly instead of being handed a payload that doesn't add up.
+    solved_in_si_value: float | None = None
+    solved_in_si_unit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +139,8 @@ class Solution:
                     "solved_symbol": step.solved_symbol,
                     "value": step.value,
                     "unit": step.unit,
+                    "solved_in_si_value": step.solved_in_si_value,
+                    "solved_in_si_unit": step.solved_in_si_unit,
                 }
                 for step in self.steps
             ],

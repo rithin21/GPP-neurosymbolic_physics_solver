@@ -84,16 +84,34 @@ class Narrator:
             "target": problem.target,
             "constraints_fired": constraints,
             "verified_steps": [
-                {
-                    "equation": step.equation,
-                    "substitution": step.substitution,
-                    "solved_symbol": step.solved_symbol,
-                    "value": step.value,
-                    "unit": step.unit,
-                }
-                for step in steps
+                self._step_payload(step) for step in steps
             ],
         }
+
+    def _step_payload(self, step: SolutionStep) -> dict:
+        payload = {
+            "equation": step.equation,
+            "substitution": step.substitution,
+            "solved_symbol": step.solved_symbol,
+            "value": step.value,
+            "unit": step.unit,
+        }
+        if step.solved_in_si_value is not None:
+            # value/unit above are a unit-converted display answer that does
+            # NOT follow from substituting `substitution` into `equation` -
+            # that substitution actually produces solved_in_si_value/unit.
+            # Spelled out explicitly so the narrator states both truthfully
+            # (solve in SI, then convert) instead of a single number that
+            # doesn't match its own working.
+            payload["solved_in_si"] = {
+                "value": step.solved_in_si_value,
+                "unit": step.solved_in_si_unit,
+            }
+            payload["note"] = (
+                "substitution + equation solve to solved_in_si (not to value/unit directly); "
+                "value/unit is solved_in_si converted to the unit the question asked for."
+            )
+        return payload
 
     def _template_narration(#manual construction of answer from certain details that we have
         self,
@@ -118,12 +136,22 @@ class Narrator:
         if constraints and overlay.show_intermediate_steps:
             lines.append("Graph constraint used: " + ", ".join(constraints))
 
+        # substitution + equation solve to solved_in_si_value/unit when a
+        # unit conversion happened, not directly to value/unit - state both
+        # so "Use <equation> with <substitution>" isn't followed by a number
+        # those inputs don't actually produce.
+        if step.solved_in_si_value is not None:
+            si_unit = f" {step.solved_in_si_unit}" if overlay.show_units and step.solved_in_si_unit else ""
+            result_clause = f"So, {step.solved_symbol} = {step.solved_in_si_value:g}{si_unit}, converted to {step.value:g}{unit}."
+        else:
+            result_clause = f"So, {step.solved_symbol} = {step.value:g}{unit}."
+
         if overlay.show_intermediate_steps:
             substituted = ", ".join(f"{key}={value:g}" for key, value in step.substitution.items())
             lines.append(f"Use {step.equation} with {substituted}.")
-            lines.append(f"So, {step.solved_symbol} = {step.value:g}{unit}.")
+            lines.append(result_clause)
         else:
-            lines.append(f"{step.solved_symbol} = {step.value:g}{unit}.")
+            lines.append(result_clause if step.solved_in_si_value is not None else f"{step.solved_symbol} = {step.value:g}{unit}.")
 
         return "\n".join(lines)
 

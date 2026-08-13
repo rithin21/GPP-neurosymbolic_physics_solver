@@ -206,18 +206,27 @@ class CalcMatePipeline:
     # Regex-detected "in <unit>" phrasing for each unit the answer might be
     # requested in. New spellings map onto the same handful of canonical
     # units without each needing its own accepted-string entry elsewhere.
+    # The "per <time>" alternatives here must stay in sync with the
+    # abbreviation tolerance already used by the standalone time patterns
+    # below (hours?|hrs?|h, minutes?|mins?|min, seconds?|secs?|s) - if a
+    # compound pattern (e.g. km/hour) accepts a narrower set of spellings
+    # than the standalone one, an unmatched compound phrase like "km/hr"
+    # falls through to a *later*, unrelated pattern in this same list (here,
+    # the bare "in km" length pattern) and gets silently misclassified as
+    # the wrong physical quantity entirely (length instead of speed) rather
+    # than just failing to match.
     _OUTPUT_UNIT_PATTERNS: list[tuple[str, str]] = [
-        (r"\bin\s+(?:kilometers?|kilometres?|km)\s*(?:per|/)\s*(?:hour|h)\b", "km/h"),
+        (r"\bin\s+(?:kilometers?|kilometres?|km)\s*(?:per|/)\s*(?:hours?|hrs?|h)\b", "km/h"),
         (r"\bin\s+kmph\b", "km/h"),
-        (r"\bin\s+(?:kilometers?|kilometres?|km)\s*(?:per|/)\s*(?:minute|min)\b", "km/min"),
-        (r"\bin\s+(?:centimeters?|centimetres?|cm)\s*(?:per|/)\s*(?:second|s)\b", "cm/s"),
+        (r"\bin\s+(?:kilometers?|kilometres?|km)\s*(?:per|/)\s*(?:minutes?|mins?|min)\b", "km/min"),
+        (r"\bin\s+(?:centimeters?|centimetres?|cm)\s*(?:per|/)\s*(?:seconds?|secs?|s)\b", "cm/s"),
         (r"\bin\s+(?:millimeters?|millimetres?|mm)\b", "mm"),
         (r"\bin\s+(?:centimeters?|centimetres?|cm)\b", "cm"),
         (r"\bin\s+(?:kilometers?|kilometres?|km)\b", "km"),
-        (r"\bin\s+(?:meters?|metres?)\s*(?:per|/)\s*(?:second|s)\b", "m/s"),
+        (r"\bin\s+(?:meters?|metres?)\s*(?:per|/)\s*(?:seconds?|secs?|s)\b", "m/s"),
         (r"\bin\s+(?:meters?|metres?)\b", "m"),
         (r"\bin\s+(?:milliseconds?|ms)\b", "ms"),
-        (r"\bin\s+(?:minutes?|min)\b", "min"),
+        (r"\bin\s+(?:minutes?|mins?|min)\b", "min"),
         (r"\bin\s+(?:hours?|hrs?|h)\b", "h"),
     ]
 
@@ -275,7 +284,19 @@ class CalcMatePipeline:
         converted_value = convert_si_value(step.value, step.unit, requested_unit)
         if converted_value is None:
             return None
-        return replace(step, value=round(converted_value, 4), unit=requested_unit)
+        # step.substitution stays the SI inputs actually used to solve
+        # `equation` - only value/unit change here, so record the pre-
+        # conversion SI value/unit too. Without this, a consumer (the
+        # narrator especially) sees substitution+equation implying one
+        # number while value/unit claim another, with nothing connecting
+        # the two - see SolutionStep's docstring comment.
+        return replace(
+            step,
+            value=round(converted_value, 4),
+            unit=requested_unit,
+            solved_in_si_value=step.value,
+            solved_in_si_unit=step.unit,
+        )
 
     def _phase_8_narrate(self, reasoning: ReasoningResult, overlay, trace: list[PhaseTrace]) -> str:
         narration = self.narrator.narrate(
